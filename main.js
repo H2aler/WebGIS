@@ -56,6 +56,14 @@ class WebGISMap {
         this.routeCoords = []; // EPSG:3857 좌표 배열
         this.routeLineFeature = null;
         
+        // 검색 결과 마커 관리
+        this.searchResultMarkers = [];
+        this.searchResultFeatures = [];
+        
+        // 즐겨찾기 마커 관리
+        this.favoriteMarkers = [];
+        this.favoriteFeatures = [];
+        
         this.initMap();
         this.initControls();
         this.initSearch();
@@ -64,6 +72,8 @@ class WebGISMap {
         this.renderFavorites();
         this.bindFullscreen();
         this.bindMeasureButtons();
+        
+
     }
 
     // 지도 초기화
@@ -134,6 +144,17 @@ class WebGISMap {
                 this.addMarker(event.coordinate);
                 this.deactivateCurrentTool();
                 document.getElementById('addMarker').classList.remove('active');
+            }
+        });
+
+        // 즐겨찾기 마커 클릭 이벤트 (삭제용)
+        this.map.on('click', (event) => {
+            const feature = this.map.forEachFeatureAtPixel(event.pixel, (feature) => feature);
+            if (feature && feature.get('properties') && feature.get('properties').type === 'favorite') {
+                const markerId = feature.get('properties').id;
+                if (confirm('이 즐겨찾기 마커를 삭제하시겠습니까?')) {
+                    this.removeFavoriteMarker(markerId);
+                }
             }
         });
     }
@@ -313,6 +334,8 @@ class WebGISMap {
             const name = result.display_name.split(',')[0];
             const details = result.display_name.split(',').slice(1, 3).join(',');
             
+            console.log(`📝 검색 결과 ${index} 생성:`, { name, lat: result.lat, lon: result.lon });
+            
             return `
                 <div class="search-result-item" data-lat="${result.lat}" data-lon="${result.lon}" data-index="${index}">
                     <div class="search-result-content">
@@ -335,16 +358,34 @@ class WebGISMap {
         if (clearBtn) clearBtn.addEventListener('click', () => this.hideSearchResults());
 
         // 검색 결과 클릭 이벤트 (콘텐츠 영역)
-        searchResults.querySelectorAll('.search-result-item .search-result-content').forEach(content => {
+        const contentElements = searchResults.querySelectorAll('.search-result-item .search-result-content');
+        console.log('🔗 찾은 검색 결과 콘텐츠 요소 개수:', contentElements.length);
+        
+        contentElements.forEach((content, contentIndex) => {
+            console.log(`🔗 이벤트 리스너 추가 중 - contentIndex: ${contentIndex}`);
             content.addEventListener('click', (e) => {
+                console.log('🔍 검색 결과 클릭됨 - contentIndex:', contentIndex);
                 const parent = content.closest('.search-result-item');
                 const lat = parseFloat(parent.dataset.lat);
                 const lon = parseFloat(parent.dataset.lon);
                 const index = parseInt(parent.dataset.index);
+                const name = content.querySelector('.search-result-name').textContent.replace('📍 ', '');
+                
+                console.log('📍 클릭된 위치:', { lat, lon, name, index });
+                console.log('📍 results 배열:', results);
+                console.log('📍 results[index]:', results[index]);
+                
+                // 위치로 이동
+                this.goToLocation(lat, lon);
+                
+                // 검색 결과 마커 추가
+                this.addSearchResultMarker(lat, lon, name, results[index]);
+                
                 // 스마트 거리 측정 시작점으로 설정
                 this.startSmartDistanceFrom(lat, lon);
+                
                 this.hideSearchResults();
-                document.getElementById('searchInput').value = content.querySelector('.search-result-name').textContent.replace('📍 ', '');
+                document.getElementById('searchInput').value = name;
             });
         });
 
@@ -391,6 +432,9 @@ class WebGISMap {
         list.push(item);
         localStorage.setItem('favorites', JSON.stringify(list));
         this.renderFavorites();
+        
+        // 즐겨찾기 패널로 스크롤 및 하이라이트
+        this.highlightAndScrollToPanel('favorites-panel', '즐겨찾기에 추가되었습니다!');
     }
 
     getFavorites() {
@@ -415,18 +459,21 @@ class WebGISMap {
         }
         container.innerHTML = list.map(item => `
             <div class="favorite-item">
-                <div class="favorite-name">📍 ${item.name}</div>
+                <div class="favorite-info">
+                    <div class="favorite-icon">📍</div>
+                    <div class="favorite-name">${item.name}</div>
+                </div>
                 <div class="favorite-actions">
-                    <button class="go-favorite" data-id="${item.id}" data-lat="${item.lat}" data-lon="${item.lon}">이동</button>
-                    <button class="remove-favorite" data-id="${item.id}">삭제</button>
+                    <button class="go-to-favorite" data-id="${item.id}" data-lat="${item.lat}" data-lon="${item.lon}">이동</button>
+                    <button class="remove-favorite" data-id="${item.id}">X</button>
                 </div>
             </div>
         `).join('');
-        container.querySelectorAll('.go-favorite').forEach(btn => {
+        container.querySelectorAll('.go-to-favorite').forEach(btn => {
             btn.addEventListener('click', () => {
                 const lat = parseFloat(btn.dataset.lat);
                 const lon = parseFloat(btn.dataset.lon);
-                this.goToLocation(lat, lon);
+                this.goToFavoriteLocation(lat, lon);
             });
         });
         container.querySelectorAll('.remove-favorite').forEach(btn => {
@@ -469,6 +516,9 @@ class WebGISMap {
         document.getElementById('measurementResult').innerHTML =
             '<div class="measurement-guide">시작점이 설정되었습니다. 지도를 클릭해 지점을 추가하세요. 더블클릭으로 측정을 완료합니다.</div>';
 
+        // 측정 결과 패널로 스크롤 및 하이라이트
+        this.highlightAndScrollToPanel('measurement-panel', '스마트 거리 측정을 시작합니다!');
+
         // 지도 클릭으로 지점 추가
         if (this.smartClickKey) this.map.un('click', this.smartClickKey);
         this.smartClickKey = this.map.on('click', (evt) => {
@@ -496,6 +546,9 @@ class WebGISMap {
             this.routeCoords = [coord3857];
             this.toast(`시작점: ${name}`);
             document.getElementById('measurementResult').innerHTML = '<div class="measurement-guide">다음 검색 결과의 📏을 눌러 중간 또는 마지막 구간을 선택하세요.</div>';
+            
+            // 측정 결과 패널로 스크롤 및 하이라이트
+            this.highlightAndScrollToPanel('measurement-panel', '멀티 경로 측정을 시작합니다!');
             return;
         }
 
@@ -663,24 +716,68 @@ class WebGISMap {
     goToLocation(lat, lon) {
         console.log('🗺️ 위치로 이동:', lat, lon);
         
+        if (!this.map) {
+            console.error('❌ 지도 객체가 없습니다!');
+            return;
+        }
+        
         const coordinates = transform([lon, lat], 'EPSG:4326', 'EPSG:3857');
         console.log('📍 변환된 좌표:', coordinates);
         
-        this.map.getView().animate({
-            center: coordinates,
-            zoom: 12,
-            duration: 1000
-        });
-        this.toast(`📍 ${lat.toFixed(4)}, ${lon.toFixed(4)} 로 이동`);
+        try {
+            this.map.getView().animate({
+                center: coordinates,
+                zoom: 12,
+                duration: 1000
+            });
+            console.log('✅ 지도 애니메이션 시작됨');
+            this.toast(`📍 ${lat.toFixed(4)}, ${lon.toFixed(4)} 로 이동`);
 
-        // 마커 추가
-        this.addSearchMarker(lat, lon);
+            // 마커 추가
+            this.addSearchMarker(lat, lon);
+            
+            // 성공 메시지 표시
+            setTimeout(() => {
+                document.getElementById('measurementResult').innerHTML = 
+                    `<div class="measurement-success">✅ 위치로 이동했습니다! (${lat.toFixed(4)}, ${lon.toFixed(4)})</div>`;
+            }, 500);
+        } catch (error) {
+            console.error('❌ 지도 이동 중 오류:', error);
+        }
+    }
+
+    // 즐겨찾기 위치로 이동 (주황색 마커)
+    goToFavoriteLocation(lat, lon) {
+        console.log('⭐ 즐겨찾기 위치로 이동:', lat, lon);
         
-        // 성공 메시지 표시
-        setTimeout(() => {
-            document.getElementById('measurementResult').innerHTML = 
-                `<div class="measurement-success">✅ 위치로 이동했습니다! (${lat.toFixed(4)}, ${lon.toFixed(4)})</div>`;
-        }, 500);
+        if (!this.map) {
+            console.error('❌ 지도 객체가 없습니다!');
+            return;
+        }
+        
+        const coordinates = transform([lon, lat], 'EPSG:4326', 'EPSG:3857');
+        console.log('📍 변환된 좌표:', coordinates);
+        
+        try {
+            this.map.getView().animate({
+                center: coordinates,
+                zoom: 12,
+                duration: 1000
+            });
+            console.log('✅ 지도 애니메이션 시작됨');
+            this.toast(`⭐ 즐겨찾기 위치로 이동 (${lat.toFixed(4)}, ${lon.toFixed(4)})`);
+
+            // 즐겨찾기 마커 추가 (영구적)
+            this.addFavoriteMarker(lat, lon);
+            
+            // 성공 메시지 표시
+            setTimeout(() => {
+                document.getElementById('measurementResult').innerHTML = 
+                    `<div class="measurement-success">⭐ 즐겨찾기 위치로 이동했습니다! (${lat.toFixed(4)}, ${lon.toFixed(4)})</div>`;
+            }, 500);
+        } catch (error) {
+            console.error('❌ 지도 이동 중 오류:', error);
+        }
     }
 
     // 전체 화면 토글
@@ -710,22 +807,128 @@ class WebGISMap {
         }, 2000);
     }
 
-    addSearchMarker(lat, lon) {
+    // 토스트 메시지 (타입별)
+    showToast(message, type = 'info') {
+        const container = document.getElementById('toastContainer');
+        if (!container) return;
+        const el = document.createElement('div');
+        el.className = `toast toast-${type}`;
+        el.textContent = message;
+        container.appendChild(el);
+        setTimeout(() => {
+            el.remove();
+        }, 3000);
+    }
+
+    // 패널 하이라이트 및 스크롤
+    highlightAndScrollToPanel(panelClass, message = '') {
+        const panel = document.querySelector(`.${panelClass}`);
+        if (!panel) {
+            console.warn(`패널을 찾을 수 없습니다: ${panelClass}`);
+            return;
+        }
+
+        // 패널로 스크롤
+        panel.scrollIntoView({ 
+            behavior: 'smooth', 
+            block: 'center' 
+        });
+
+        // 하이라이트 효과 추가
+        panel.classList.add('panel-highlight');
+        
+        // 메시지가 있으면 토스트로 표시
+        if (message) {
+            setTimeout(() => {
+                this.showToast(message, 'info');
+            }, 500);
+        }
+
+        // 3초 후 하이라이트 제거
+        setTimeout(() => {
+            panel.classList.remove('panel-highlight');
+        }, 3000);
+    }
+
+    addSearchMarker(lat, lon, isFavorite = false) {
         const coordinates = transform([lon, lat], 'EPSG:4326', 'EPSG:3857');
         const point = new Point(coordinates);
         
         const feature = new Feature({
             geometry: point,
             type: 'marker',
-            search: true
+            search: true,
+            isFavorite: isFavorite
         });
+
+        // 즐겨찾기 마커인지에 따라 다른 스타일 적용
+        if (isFavorite) {
+            feature.setStyle(this.getFavoriteMarkerStyle());
+        }
 
         this.vectorSource.addFeature(feature);
         
-        // 3초 후 마커 제거
-        setTimeout(() => {
-            this.vectorSource.removeFeature(feature);
-        }, 3000);
+        // 즐겨찾기 마커가 아닌 경우에만 3초 후 자동 제거
+        if (!isFavorite) {
+            setTimeout(() => {
+                this.vectorSource.removeFeature(feature);
+            }, 3000);
+        }
+    }
+
+    // 즐겨찾기 마커 추가 (영구적)
+    addFavoriteMarker(lat, lon) {
+        console.log('⭐ 즐겨찾기 마커 추가:', { lat, lon });
+        
+        const coord = fromLonLat([lon, lat]);
+        console.log('📍 변환된 좌표:', coord);
+        
+        // 기존 마커가 있는지 확인
+        const existingMarker = this.favoriteMarkers.find(marker => 
+            marker.lat === lat && marker.lon === lon
+        );
+        
+        if (existingMarker) {
+            console.log('⚠️ 이미 존재하는 즐겨찾기 마커:', existingMarker);
+            // 이미 존재하는 마커라면 해당 위치로 이동만
+            this.goToLocation(lat, lon);
+            return;
+        }
+
+        // 새로운 즐겨찾기 마커 생성
+        const marker = {
+            id: Date.now().toString(),
+            lat: lat,
+            lon: lon,
+            coord: coord,
+            addedAt: new Date().toISOString(),
+            type: 'favorite'
+        };
+
+        console.log('🆕 새 즐겨찾기 마커 객체 생성:', marker);
+
+        // 마커 피처 생성
+        const feature = new Feature({
+            geometry: new Point(coord),
+            properties: marker
+        });
+
+        // 즐겨찾기 마커 전용 스타일 적용
+        feature.setStyle(this.getFavoriteMarkerStyle());
+
+        // 벡터 레이어에 추가
+        this.vectorSource.addFeature(feature);
+        console.log('✅ 벡터 레이어에 즐겨찾기 피처 추가됨');
+
+        // 마커 정보 저장
+        this.favoriteMarkers.push(marker);
+        this.favoriteFeatures.push(feature);
+        console.log('💾 즐겨찾기 마커 정보 저장됨. 총 개수:', this.favoriteMarkers.length);
+
+        // 토스트 메시지 표시
+        this.showToast(`⭐ 즐겨찾기 마커가 추가되었습니다.`, 'success');
+
+        console.log('✅ 즐겨찾기 마커 추가 완료:', marker);
     }
 
     // 이벤트 리스너 초기화
@@ -910,6 +1113,9 @@ class WebGISMap {
         document.getElementById('measurementResult').innerHTML = 
             '<div class="measurement-guide">지도에서 두 지점을 클릭하여 거리를 측정하세요.</div>';
 
+        // 측정 결과 패널로 스크롤 및 하이라이트
+        this.highlightAndScrollToPanel('measurement-panel', '거리 측정을 시작합니다!');
+
         // 기존 인터랙션 제거
         this.deactivateCurrentTool();
 
@@ -1083,6 +1289,9 @@ class WebGISMap {
         document.getElementById('measurementResult').innerHTML = 
             '<div class="measurement-guide">지도에서 다각형을 그려 면적을 측정하세요.</div>';
 
+        // 측정 결과 패널로 스크롤 및 하이라이트
+        this.highlightAndScrollToPanel('measurement-panel', '면적 측정을 시작합니다!');
+
         this.draw = new Draw({
             source: this.vectorSource,
             type: 'Polygon',
@@ -1215,6 +1424,9 @@ class WebGISMap {
         document.getElementById('measurementResult').innerHTML = 
             `<div class="measurement-success">✅ 마커가 추가되었습니다! (${lonLat[1].toFixed(4)}, ${lonLat[0].toFixed(4)})</div>`;
         
+        // 측정 결과 패널로 스크롤 및 하이라이트
+        this.highlightAndScrollToPanel('measurement-panel', '마커가 추가되었습니다!');
+        
         console.log('✅ 마커 추가 완료');
     }
 
@@ -1225,6 +1437,12 @@ class WebGISMap {
             this.vectorSource.clear();
             this.measurementResults = [];
             this.updateMeasurementDisplay();
+            
+            // 검색 결과 마커도 함께 삭제
+            this.clearAllSearchResultMarkers();
+            
+            // 즐겨찾기 마커도 함께 삭제
+            this.clearAllFavoriteMarkers();
             
             // 버튼 상태 초기화
             document.querySelectorAll('.tool-btn').forEach(btn => {
@@ -1447,6 +1665,240 @@ class WebGISMap {
                 src: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="%23ff4757"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>'
             })
         });
+    }
+
+    // 검색 결과 마커 추가
+    addSearchResultMarker(lat, lon, name, resultData) {
+        console.log('🔧 addSearchResultMarker 호출됨:', { lat, lon, name });
+        
+        const coord = fromLonLat([lon, lat]);
+        console.log('📍 변환된 좌표:', coord);
+        
+        // 기존 마커가 있는지 확인
+        const existingMarker = this.searchResultMarkers.find(marker => 
+            marker.lat === lat && marker.lon === lon
+        );
+        
+        if (existingMarker) {
+            console.log('⚠️ 이미 존재하는 마커:', existingMarker);
+            // 이미 존재하는 마커라면 해당 위치로 이동만
+            this.goToLocation(lat, lon);
+            return;
+        }
+
+        // 새로운 마커 생성
+        const marker = {
+            id: Date.now().toString(),
+            name: name,
+            lat: lat,
+            lon: lon,
+            coord: coord,
+            displayName: resultData.display_name,
+            addedAt: new Date().toISOString(),
+            type: 'search-result'
+        };
+
+        console.log('🆕 새 마커 객체 생성:', marker);
+
+        // 마커 피처 생성
+        const feature = new Feature({
+            geometry: new Point(coord),
+            properties: marker
+        });
+
+        // 검색 결과 마커 전용 스타일 적용
+        feature.setStyle(this.getSearchResultMarkerStyle());
+
+        // 벡터 레이어에 추가
+        this.vectorSource.addFeature(feature);
+        console.log('✅ 벡터 레이어에 피처 추가됨');
+
+        // 마커 정보 저장
+        this.searchResultMarkers.push(marker);
+        this.searchResultFeatures.push(feature);
+        console.log('💾 마커 정보 저장됨. 총 개수:', this.searchResultMarkers.length);
+
+        // 검색 결과 목록에 추가
+        this.addToSearchResultsList(marker);
+
+        // 토스트 메시지 표시
+        this.showToast(`📍 "${name}" 위치에 마커가 추가되었습니다.`, 'success');
+
+        // 검색 결과 마커 패널로 스크롤 및 하이라이트
+        this.highlightAndScrollToPanel('search-results-panel', '검색 결과 마커가 추가되었습니다!');
+
+        console.log('✅ 검색 결과 마커 추가 완료:', marker);
+    }
+
+    // 검색 결과 마커 전용 스타일
+    getSearchResultMarkerStyle() {
+        return new Style({
+            image: new Icon({
+                anchor: [0.5, 1],
+                src: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="%23ff6b6b"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>'
+            })
+        });
+    }
+
+    // 즐겨찾기 마커 전용 스타일 (주황색)
+    getFavoriteMarkerStyle() {
+        return new Style({
+            image: new Icon({
+                anchor: [0.5, 1],
+                src: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="%23ff9500"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>'
+            })
+        });
+    }
+
+    // 검색 결과 목록에 추가
+    addToSearchResultsList(marker) {
+        console.log('📋 addToSearchResultsList 호출됨:', marker);
+        
+        const searchResultsList = document.getElementById('searchResultsList');
+        if (!searchResultsList) {
+            console.error('❌ 검색 결과 목록 요소를 찾을 수 없습니다.');
+            return;
+        }
+
+        console.log('✅ searchResultsList 요소 찾음');
+
+        // 기존 빈 메시지 제거
+        const emptyElement = searchResultsList.querySelector('.empty');
+        if (emptyElement) {
+            emptyElement.remove();
+            console.log('🗑️ 기존 빈 메시지 제거됨');
+        }
+
+        // 마커 항목 HTML 생성
+        const markerItem = document.createElement('div');
+        markerItem.className = 'search-result-marker-item';
+        markerItem.dataset.id = marker.id;
+        markerItem.innerHTML = `
+            <div class="marker-info">
+                <div class="marker-name">📍 ${marker.name}</div>
+                <div class="marker-details">${marker.displayName.split(',').slice(1, 3).join(',')}</div>
+                <div class="marker-time">${new Date(marker.addedAt).toLocaleString('ko-KR')}</div>
+            </div>
+            <div class="marker-actions">
+                <button class="go-to-marker" title="해당 위치로 이동">🚀</button>
+                <button class="remove-marker" title="마커 삭제">🗑️</button>
+            </div>
+        `;
+
+        console.log('🆕 마커 항목 HTML 생성됨');
+
+        // 이벤트 리스너 추가
+        markerItem.querySelector('.go-to-marker').addEventListener('click', () => {
+            console.log('🚀 이동 버튼 클릭됨:', marker.name);
+            this.goToLocation(marker.lat, marker.lon);
+        });
+
+        markerItem.querySelector('.remove-marker').addEventListener('click', () => {
+            console.log('🗑️ 삭제 버튼 클릭됨:', marker.name);
+            this.removeSearchResultMarker(marker.id);
+        });
+
+        // 목록 맨 위에 추가
+        searchResultsList.insertBefore(markerItem, searchResultsList.firstChild);
+        console.log('✅ 마커 항목이 목록에 추가됨');
+    }
+
+    // 검색 결과 마커 삭제
+    removeSearchResultMarker(markerId) {
+        const markerIndex = this.searchResultMarkers.findIndex(m => m.id === markerId);
+        if (markerIndex === -1) return;
+
+        const marker = this.searchResultMarkers[markerIndex];
+        const featureIndex = this.searchResultFeatures.findIndex(f => 
+            f.get('properties').id === markerId
+        );
+
+        // 벡터 레이어에서 피처 제거
+        if (featureIndex !== -1) {
+            this.vectorSource.removeFeature(this.searchResultFeatures[featureIndex]);
+            this.searchResultFeatures.splice(featureIndex, 1);
+        }
+
+        // 마커 정보 제거
+        this.searchResultMarkers.splice(markerIndex, 1);
+
+        // DOM에서 마커 항목 제거
+        const markerItem = document.querySelector(`[data-id="${markerId}"]`);
+        if (markerItem) {
+            markerItem.remove();
+        }
+
+        // 토스트 메시지 표시
+        this.showToast(`🗑️ "${marker.name}" 마커가 삭제되었습니다.`, 'info');
+
+        console.log('🗑️ 검색 결과 마커 삭제:', marker.name);
+    }
+
+
+
+    // 모든 검색 결과 마커 삭제
+    clearAllSearchResultMarkers() {
+        // 벡터 레이어에서 모든 검색 결과 피처 제거
+        this.searchResultFeatures.forEach(feature => {
+            this.vectorSource.removeFeature(feature);
+        });
+
+        // 배열 초기화
+        this.searchResultMarkers = [];
+        this.searchResultFeatures = [];
+
+        // DOM에서 모든 마커 항목 제거
+        const searchResultsList = document.getElementById('searchResultsList');
+        if (searchResultsList) {
+            searchResultsList.innerHTML = '<div class="empty">검색 결과를 선택하면 여기에 마커가 추가됩니다.</div>';
+        }
+
+        // 토스트 메시지 표시
+        this.showToast('🗑️ 모든 검색 결과 마커가 삭제되었습니다.', 'info');
+
+        console.log('🗑️ 모든 검색 결과 마커 삭제 완료');
+    }
+
+    // 즐겨찾기 마커 삭제
+    removeFavoriteMarker(markerId) {
+        const markerIndex = this.favoriteMarkers.findIndex(m => m.id === markerId);
+        if (markerIndex === -1) return;
+
+        const marker = this.favoriteMarkers[markerIndex];
+        const featureIndex = this.favoriteFeatures.findIndex(f => 
+            f.get('properties').id === markerId
+        );
+
+        // 벡터 레이어에서 피처 제거
+        if (featureIndex !== -1) {
+            this.vectorSource.removeFeature(this.favoriteFeatures[featureIndex]);
+            this.favoriteFeatures.splice(featureIndex, 1);
+        }
+
+        // 마커 정보 제거
+        this.favoriteMarkers.splice(markerIndex, 1);
+
+        // 토스트 메시지 표시
+        this.showToast(`🗑️ 즐겨찾기 마커가 삭제되었습니다.`, 'info');
+
+        console.log('🗑️ 즐겨찾기 마커 삭제:', marker);
+    }
+
+    // 모든 즐겨찾기 마커 삭제
+    clearAllFavoriteMarkers() {
+        // 벡터 레이어에서 모든 즐겨찾기 피처 제거
+        this.favoriteFeatures.forEach(feature => {
+            this.vectorSource.removeFeature(feature);
+        });
+
+        // 배열 초기화
+        this.favoriteMarkers = [];
+        this.favoriteFeatures = [];
+
+        // 토스트 메시지 표시
+        this.showToast('🗑️ 모든 즐겨찾기 마커가 삭제되었습니다.', 'info');
+
+        console.log('🗑️ 모든 즐겨찾기 마커 삭제 완료');
     }
 }
 
